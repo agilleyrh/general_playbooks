@@ -1,0 +1,46 @@
+---
+- name: Install and Configure Nginx
+  hosts: webservers
+  become: true  # This is required to install packages and manage services (uses sudo)
+  tasks:
+    - name: Update apt cache (for Debian/Ubuntu)
+      ansible.builtin.apt:
+        update_cache: yes
+        cache_valid_time: 3600 # One hour
+      when: ansible_os_family == "Debian"
+      changed_when: false # This task should not report a change
+
+    - name: Ensure EPEL repository is enabled (for RHEL/CentOS)
+      ansible.builtin.package:
+        name: epel-release
+        state: present
+      when: ansible_os_family == "RedHat"
+
+    - name: Install the nginx package
+      ansible.builtin.package:
+        name: nginx
+        state: present
+
+    - name: Allow HTTP and HTTPS traffic through firewalld (for RHEL/CentOS)
+      ansible.posix.firewalld:
+        service: "{{ item }}"
+        permanent: true
+        state: enabled
+        immediate: yes # Apply the rule immediately without reloading firewalld
+      loop:
+        - http
+        - https
+      when: "'firewalld' in ansible_facts.services"
+
+    - name: Allow 'Nginx Full' profile through ufw (for Debian/Ubuntu)
+      ansible.builtin.ufw:
+        rule: allow
+        name: 'Nginx Full' # 'Nginx Full' is a predefined profile for ports 80 and 443
+        state: enabled
+      when: "'ufw' in ansible_facts.services"
+
+    - name: Ensure nginx service is started and enabled on boot
+      ansible.builtin.service:
+        name: nginx
+        state: started
+        enabled: true
