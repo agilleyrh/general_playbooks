@@ -1,0 +1,85 @@
+---
+- name: Install and Configure Zammad on RHEL
+  hosts: zammad_servers
+  become: yes
+  vars:
+    zammad_admin_user: "admin"
+    zammad_admin_password: "redhat" # WARNING: Use Ansible Vault for production!
+
+  tasks:
+    - name: Add Elasticsearch 7.x repository
+      ansible.builtin.yum_repository:
+        name: elasticsearch-7.x
+        description: Elasticsearch repository for 7.x packages
+        baseurl: https://artifacts.elastic.co/packages/7.x/yum
+        gpgkey: https://artifacts.elastic.co/GPG-KEY-elasticsearch
+        gpgcheck: yes
+        enabled: yes
+
+    - name: Add Zammad repository
+      ansible.builtin.yum_repository:
+        name: zammad
+        description: Zammad repository
+        baseurl: https://dl.packager.io/srv/zammad/zammad/stable/el/8/$basearch
+        repo_gpgcheck: yes
+        gpgkey: https://dl.packager.io/srv/zammad/zammad/gpgkey
+        enabled: yes
+        # Note: The URL is the same for RHEL 9 as per Zammad's documentation provider.
+
+    - name: Install required packages (Zammad, PostgreSQL, Elasticsearch)
+      ansible.builtin.dnf:
+        name:
+          - zammad
+          - postgresql-server
+          - elasticsearch-7.17.2 # Pin a version known to be compatible
+        state: present
+        update_cache: yes
+      notify: Restart elasticsearch
+
+    - name: Initialize PostgreSQL database
+      ansible.builtin.command: postgresql-setup --initdb
+      args:
+        creates: /var/lib/pgsql/data/PG_VERSION
+
+    - name: Enable and start services
+      ansible.builtin.service:
+        name: "{{ item }}"
+        enabled: yes
+        state: started
+      loop:
+        - postgresql
+        - elasticsearch
+        - zammad
+
+    # The following tasks may take a few moments to run
+    - name: Configure Zammad with Elasticsearch
+      ansible.builtin.command: zammad run rails r "Setting.set('es_url', 'http://localhost:9200')"
+      become_user: zammad
+      changed_when: false # This command doesn't provide reliable change output
+
+    - name: Rebuild Elasticsearch index
+      ansible.builtin.command: zammad run rake zammad:searchindex:rebuild
+      become_user: zammad
+      changed_when: false
+      async: 300 # This can take a while, run it asynchronously
+      poll: 10
+
+    - name: Set initial admin user's password
+      ansible.builtin.command: >
+        zammad run rails r "user = User.find_by(login: '{{ zammad_admin_user }}'); user.password = '{{ zammad_admin_password }}'; user.save!"
+      become_user: zammad
+      changed_when: false
+      # This command is not fully idempotent but is safe to run on initial setup.
+
+    - name: Open firewall for HTTP traffic
+      ansible.posix.firewalld:
+        service: http
+        permanent: yes
+        state: enabled
+        immediate: yes
+
+  handlers:
+    - name: Restart elasticsearch
+      ansible.builtin.service:
+        name: elasticsearch
+        state: restarted
